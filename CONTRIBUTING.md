@@ -40,13 +40,12 @@ gh issue edit <n> --add-assignee @me
 | 感知层 `perception.py` | CLI 进程里验不了读屏（会静默降级）——起真应用看 `~/Library/Logs/jev-jarvis.log`，日志刻意不含消息正文，可放心贴进 PR |
 | 判断层 `judge.py`（尤其 prompt） | `uv run python src/judge_zh_test.py`——意图回归，数字退了不许合 |
 | 发出消息识别 / 回复目标切换（`perception.py` + `hud.py`） | `uv run python -B -m unittest discover -s tests`——离线回归（合成 OCR，不读屏、不调 API、不读凭据） |
-| 生成层 `generate.py` | `uv run python src/generate.py --check`（凭据解析）+ 真跑一条候选生成确认非空 |
-| 悬浮窗/轮询 `hud.py` | 起真应用走一轮完整流程：消息出现 → 判断 → 候选上屏 → 一键填入 |
+| 悬浮窗/轮询 `hud.py` | 起真应用走一轮完整流程：消息出现 → 判断 → 上屏 |
 
 几条必守（都是实测过的教训，动手前先读对应源码顶部注释）：
 
 - 判断层 prompt **别顺手优化措辞**：压缩/改写实测掉点，语义等价的瘦身也不行（`judge.py` INTENTS 上的注释有记录）；改了 prompt 必须重跑上面那张表里的回归。
-- 生成层不能用 thinking 模型：思考吃光 `max_tokens`，候选 0 条，面板只报「生成失败」。
+- 生成层已移除（`generate.py` / `builtin.py` 都删了），别再往里加会出网生成的代码——本分支的硬要求是零数据外传。
 - 轮询与线程结构别「顺手优化」：停稳窗口与最小分析间隔是防刷屏上限、不能删，分析跑在独立线程（`hud.py` 内注释有原因），塞回轮询线程会让分析期间读屏停摆。
 - 改了用户可见行为 → 同步 `README.md`；改动不能破坏纯只读原则和「填入走辅助功能接口」的实现（别改回剪贴板 + Cmd+V，原因见 `src/fill.py` 顶部注释）。
 - PR 描述里标注改动类型：【新增】/【修改】/【删除】各点了哪些类、方法、配置，方便 review。

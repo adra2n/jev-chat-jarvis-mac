@@ -28,7 +28,7 @@ import time
 import urllib.error
 
 import userconfig
-from generate import http_post_json
+from httpjson import http_post_json
 from judge import ACTION_MAP, INTENTS, RISK_LEVELS
 
 DEFAULT_BASE = "https://api.typesafe.ai"
@@ -125,7 +125,7 @@ class JevJudge:
     def _post(self, payload: dict) -> dict:
         url = f"{self.base}/v1/systemone"
         self._last_url = url
-        # 与生成层共用 keep-alive 池（src/generate.py）：判断+排序各一次网络调用，
+        # 走共享 keep-alive 池（src/httpjson.py）：判断+排序各一次网络调用，
         # 每次省掉一条 TLS 握手
         return http_post_json(
             url,

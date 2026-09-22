@@ -2,7 +2,7 @@
 
 微信悬浮窗助手（macOS）：OCR 读微信窗口 → 本地模型判意图/风险 → 悬浮窗展示。纯只读、零封号风险是**核心原则**，任何改动不得破坏。
 
-**本分支已移除生成层**：不向任何外部服务发送数据、面板不再有候选回复与填入。`src/generate.py` / `src/fill.py` / `src/styles.py` / `src/judge_jev.py` 仍在仓库里，但 `hud.py` 不再 import——加回来等于推翻这条决定，先跟用户确认。
+**本分支已移除生成层**：不向任何外部服务发送数据、面板不再有候选回复与填入。`src/generate.py` 与 `src/builtin.py`（原随包分发的内置凭据）**已删除**；`src/fill.py` / `src/styles.py` / `src/judge_jev.py` 仍在仓库里但 `hud.py` 不再 import——把生成层加回来等于推翻这条决定，先跟用户确认。
 
 ## 目录与命令
 
@@ -30,7 +30,7 @@
 - **YOLO 检测框**（`_build_overlay`/`applyBoxes_`，`JEV_BOXES=1` 启动即开、菜单栏可切、默认关）：透明点击穿透窗把最近一次 OCR 的消息画成检测框，纯视觉层——窗口 ID 抓图看不见它、不参与任何管线逻辑；坐标映射依赖 1x nominal 采集尺寸=窗口点尺寸（`capture_image(nominal=True)` 成立）。`Message` 的 x/w 是框几何，折行时在 `extract_messages` 里维护。
 - **本地推理用 float16**：MPS 对 bfloat16 算子覆盖不全会走慢路径（实测 ~1.4s vs ~0.75s，准确率不变）。
 - **OCR 用 Vision**：语言只留 `zh-Hans`（多加 en-US 逐块一致却慢 30%）、Accurate 档（Fast 漏字）、语言校正开着、别缩 ROI（丢上下文）。**采集分辨率降到 1x**（`kCGWindowImageNominalResolution`）是实测过的例外：合成中文 6 行 2x ~140ms → 1x ~100ms、逐字一致；布局常量全是归一化的，不受影响。
-- **HTTP 走 keep-alive 池**（`generate.py` 的 `http_post_json`，judge_jev 共用）：每次 urllib.urlopen 新建 DNS+TCP+TLS 白付 ~0.1–0.3 s。网络异常换新连接重试一次；>=300 按 `urllib.error.HTTPError` 形状抛（调用方 `e.read()` 拿正文），不跟随重定向。
+- **HTTP 走 keep-alive 池**（`src/httpjson.py` 的 `http_post_json`，judge_jev 的判断与排序共用）：每次 urllib.urlopen 新建 DNS+TCP+TLS 白付 ~0.1–0.3 s。网络异常换新连接重试一次；>=300 按 `urllib.error.HTTPError` 形状抛（调用方 `e.read()` 拿正文），不跟随重定向。**没有例外的密钥扫描**：`packaging/build_app.sh` 会拦 `src/` 下任何 `sk-` token——`builtin.py` 那条排除规则已随内置凭据一起删掉。
 - **配置只有 env 一种格式**（无 config.json）：`~/.config/jev-jarvis/env` 等，**凭据解析以 key 为准**——提供 key 的来源同时决定端点和模型。不提供第二种配置文件格式是有意为之。
 - 环境固定 **Python 3.11**（`.python-version` + `~/Desktop/project/.venv-jev-jarvis`）：x86_64 Mac 拿不到 torch≥2.5 的 wheel，只能 torch 2.2.x；transformers 5.x 又要求 torch≥2.5，故锁 `transformers>=4.48,<4.49`；Python 3.12+ 会让 torch.compile / ModernBERT 出问题。
 

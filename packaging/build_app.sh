@@ -198,16 +198,15 @@ check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.pyth
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
 check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
 check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
-# a key that leaked into src/ would ship to whoever gets the bundle. src/builtin.py is the
-# single deliberate exception — it holds the shared default that lets an unconfigured install
-# produce candidates at all, which is why that token must be scope-limited and capped.
-# Every other file still has to be clean, so accidental leaks stay caught.
-if grep -rEl --binary-files=without-match --exclude=builtin.py 'sk-[A-Za-z0-9]{20,}' \
+# a key that leaked into src/ would ship to whoever gets the bundle. src/builtin.py used to
+# be the single deliberate exception (the bundled shared credential); it went away with the
+# generation layer, so there are no exceptions left — every sk- token in src/ is a leak.
+if grep -rEl --binary-files=without-match 'sk-[A-Za-z0-9]{20,}' \
         "$APP/Contents/Resources/app/src" "$APP/Contents/Resources/app/.env.example" 2>/dev/null | grep -q .; then
     echo "    ✗ 源码里疑似有 API key" >&2
     exit 1
 fi
-echo "    ✓ 没夹带 API key（builtin.py 的内置凭据是刻意保留的）"
+echo "    ✓ 没夹带 API key（无例外）"
 
 echo "==> 完成"
 du -sh "$APP" | awk '{print "    包体积: " $1}'
