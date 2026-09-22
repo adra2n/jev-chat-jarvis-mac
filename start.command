@@ -2,21 +2,20 @@
 # 启动 jev-jarvis 悬浮窗（不装 LaunchAgent，按需手动启动）
 cd "$(dirname "$0")"
 export USE_TF=0
+# 使用 jev-jarvis 虚拟环境
+VENV_DIR="$HOME/Desktop/project/.venv-jev-jarvis"
+if [ -d "$VENV_DIR" ]; then
+    source "$VENV_DIR/bin/activate"
+else
+    print "未找到虚拟环境: $VENV_DIR"
+    print "请先创建虚拟环境: python3 -m venv $VENV_DIR"
+    exit 1
+fi
 # uv installs to ~/.local/bin; a Finder-launched .command does not inherit a login shell
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # same user-level env the .app launcher uses (API keys live outside the repo)
 [ -f "$HOME/.config/jev-jarvis/env" ] && source "$HOME/.config/jev-jarvis/env"
+# 启用离线模式（模型已缓存）
+export HF_HUB_OFFLINE=1
 
-# uv is the only hard dependency, and its official installer is one line. Asking a
-# non-developer to run that by hand is where "it just doesn't start" comes from.
-if ! command -v uv >/dev/null 2>&1; then
-    print "未找到 uv，正在用官方脚本安装（约 10 MB）…"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-if ! command -v uv >/dev/null 2>&1; then
-    print "uv 自动安装失败。请手动安装后重试："
-    print "    brew install uv     或     curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
-
-exec uv run python src/hud.py
+exec python3 src/hud.py

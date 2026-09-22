@@ -49,13 +49,17 @@ def check():
     assert messages[0].lines == ["这是自己说的长消息", "较短的下一行"]
     assert messages[-1].text == "11"
 
-    # Incoming sender labels still attach to their message or disappear when isolated.
+    # Incoming sender labels still attach to the message under them.
     messages = extract_messages([
         TextBlock("小王", 1.0, .40, .60, .05, .020),
         TextBlock("下午开会", 1.0, .40, .45, .15, .035),
     ])
     assert len(messages) == 1 and messages[0].sender == "小王"
-    assert not extract_messages([TextBlock("小王", 1.0, .40, .60, .05, .020)])
+    # An isolated short line is KEPT, not dropped: a one-line bubble measures
+    # h=0.018-0.025 on this window against a sender name's 0.019-0.023, so the ranges
+    # overlap completely and dropping these ate every real short incoming message.
+    kept = extract_messages([TextBlock("小王", 1.0, .40, .60, .05, .020)])
+    assert len(kept) == 1 and kept[0].side == "them"
     print("PASS: window selection, outgoing short/wrapped messages and incoming sender labels")
 
 

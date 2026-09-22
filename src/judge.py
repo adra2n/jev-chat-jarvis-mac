@@ -5,6 +5,10 @@ append further `Question k: ... Answer k: (` blocks and read logits at each slot
 
 Measured on 22 real Chinese workplace messages, zero-shot: 86% intent accuracy
 against a 13.6% majority baseline.
+
+This module now supports multiple backends:
+- TypeSafe Jev API (cloud, requires API key)
+- Local Laya model (default, no API key needed)
 """
 
 from __future__ import annotations
@@ -12,6 +16,8 @@ from __future__ import annotations
 import threading
 
 import numpy as np
+
+import userconfig
 
 # 描述保持这个长度是有实测依据的，别为了省 prefill 时间去瘦身：两轮压缩措辞
 # （保语义锚点、每条砍 ~1/3 字符）在 22 条回归上分别是 81.8% 和 77.3%，都低于
@@ -208,7 +214,7 @@ if __name__ == "__main__":
 
 
 class FallbackJudge:
-    """Prefer the official Jev API; drop to the local model if it fails.
+    """Prefer the official Jev API; drop to the local Laya model if it fails.
 
     A judgment layer that dies because a key expired or a gateway hiccuped would take the
     whole panel down, so the first failure switches permanently to the local model and the
@@ -224,7 +230,8 @@ class FallbackJudge:
 
     def _fallback(self):
         if self.local is None:
-            self.local = Judge()
+            import judge_laya
+            self.local = judge_laya.LayaJudge()
         return self.local
 
     def judge(self, message: str, context: str | None = None) -> dict:
@@ -235,7 +242,7 @@ class FallbackJudge:
                 self.fell_back = True
                 self.reason = f"{type(e).__name__}: {str(e)[:80]}"
         out = self._fallback().judge(message, context)
-        out["backend"] = f"local (Jev 不可用: {self.reason})"
+        out["backend"] = f"local-laya (Jev 不可用: {self.reason})"
         return out
 
     def rank_candidates(self, message: str, intent: str, candidates: list[str]) -> list[dict]:
@@ -252,11 +259,25 @@ class FallbackJudge:
 
 
 def make_judge():
-    """Jev when a key is configured, otherwise the local decider-2b."""
+    """Jev when a key is configured, otherwise local Laya model.
+    
+    Priority:
+    1. TypeSafe Jev API (if configured)
+    2. Local Laya model (default)
+    """
+    import userconfig
+    
+    # Check for TypeSafe Jev first
     try:
         import judge_jev
         if judge_jev.jev_configured():
             return FallbackJudge()
     except Exception:
         pass
-    return Judge()
+    
+    # Use Laya as the local judge (no more decider-2b)
+    try:
+        import judge_laya
+        return judge_laya.LayaJudge()
+    except Exception as e:
+        raise RuntimeError(f"Laya 模型加载失败: {e}")

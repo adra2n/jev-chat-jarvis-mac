@@ -5,8 +5,15 @@ Validated facts this module is built on (probed 2026-09-21 on WeChat 4.1 Mac):
     so our HUD floating above it never pollutes the capture.
   * Vision OCR reads Simplified Chinese chat text at conf 1.00 on message bodies;
     errors are rare and confined to unusual glyphs.
-  * The window layout is stable: chat list occupies x < ~0.30, chat pane x > ~0.32,
-    title bar above y ~0.90, input box below y ~0.09.
+  * The three layout constants are calibrated on pixels from the one window size this
+    app runs against — 1440x814pt, fixed by the user, the window is never resized:
+    list right edge 300.5pt, header separator 51.5pt, input box top 670.5pt. The old
+    guesses (0.32 / 0.90 / 0.24) were all wrong for it: 0.32 sat *inside* the chat pane
+    and sliced the left edge off every incoming bubble so OCR returned one character,
+    0.90 dropped the topmost message and 0.24 the newest one. Reference pixels for
+    anyone re-deriving them: list bg 238 vs pane bg 250, header line 242, input-box
+    line 247/223/225/247 — note the input box interior is the same 250 as the chat
+    area, so its top edge only ever shows up as a line, never as a colour change.
 """
 
 from __future__ import annotations
@@ -20,10 +27,19 @@ from pathlib import Path
 
 import Quartz
 
-# --- layout constants (normalized 0..1 within the window; tuned on the probe data) ---
-CHAT_PANE_X_MIN = 0.32
-TITLE_BAR_Y_MAX = 0.90
-INPUT_AREA_Y_MIN = 0.24
+# --- layout constants (normalized 0..1 within the window) -------------------------------
+# Calibrated on pixels of the one window size this runs against (1440x814pt, fixed):
+#   CHAT_PANE_X_MIN  =  300.5 / 1440   list right edge — list bg 238, pane bg 250
+#   TITLE_BAR_Y_MAX  = 1 - 51.5 / 814  separator under the title band — line at 242
+#   INPUT_AREA_Y_MIN =  143.5 / 814    input box top — line at 247/223/225/247
+# Bottom-origin, i.e. Vision's convention for boundingBox.origin.y. The previous guesses
+# (0.32 / 0.90 / 0.24) were all wrong for this window and each lost messages in a
+# different place: 0.32 sat *inside* the chat pane so the ROI sliced the left edge off
+# every incoming bubble and OCR returned a single character, 0.90 dropped the topmost
+# message (measured y=0.912), 0.24 dropped the newest one (measured y=0.201).
+CHAT_PANE_X_MIN = 0.2083
+TITLE_BAR_Y_MAX = 0.9367
+INPUT_AREA_Y_MIN = 0.1763
 SIDEBAR_X_MAX = 0.30
 
 # --- content filters ---
@@ -488,13 +504,14 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
                 and (nxt.y - m.y) > 0.035):
             nxt.sender = m.text.strip().rstrip("：:")
             continue
-        # A small-type line with nothing message-sized under it is a stray sender name
-        # (WeChat renders one above every bubble, including image-only messages). It is
-        # never something to judge. Our own bubbles have no sender name above them;
-        # short outgoing text can be just as small, especially in a tall window.
-        if (m.side == "them" and m.h < USERNAME_H_MAX
-                and len(m.text) <= 16 and "\n" not in m.text):
-            continue
+        # No "isolated short them-line = stray sender name" fallback here, deliberately.
+        # A one-line bubble measures h=0.018-0.025 and a sender name 0.019-0.023 on this
+        # window — the ranges overlap completely — so that rule silently ate every short
+        # incoming message, which is the commonest kind (it is what made a correctly
+        # cropped pane still report zero incoming messages). The rule above still
+        # attaches a name that has a message underneath it; the one case left over, a
+        # name sitting above an image-only bubble, now surfaces as a stray line instead
+        # of costing real messages.
         named.append(m)
     return named[-max_messages:]
 
