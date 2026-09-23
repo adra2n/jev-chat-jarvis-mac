@@ -7,6 +7,7 @@ All processing is local - no data sent to external APIs.
 
 from __future__ import annotations
 
+import math
 import objc
 import os
 import threading
@@ -69,6 +70,21 @@ MIN_GAP_S = 2.0
 CONTEXT_TURNS = 4
 JUDGE_TURNS = 2
 
+# 桌宠：矢量小人，点击穿透、纯展示，不参与任何管线
+PET_W = PET_H = 96          # 固定尺寸（同「微信窗口不改」的原则，不自适应）
+PET_GAP = 10                # 与 HUD 面板的间距
+PET_TICK = 0.1              # 眨眼/呼吸的驱动频率
+
+# 意图 → 表情。风险不另起映射，直接复用 applyJudgment_ 已有的分档：
+# ≤3 安全 / ≤6 留神 / >6 危险（同 721-723 行的绿/琥珀/红）
+_MOOD_BY_INTENT = {
+    "夸奖": "happy",
+    "闲聊": "chill",
+    "派活": "ready", "问进度": "ready", "约会议": "ready",
+    "催进度": "stressed",
+    "批评": "guard", "要解释": "guard",
+}
+
 
 # ---------------------------------------------------------------- palette
 def _rgb(hex_code: int, alpha: float = 1.0) -> NSColor:
@@ -119,6 +135,142 @@ class _BoxesView(NSView):
             chip.drawAtPoint_((r.origin.x, r.origin.y + r.size.height + 2))
 
 
+# ---------------------------------------------------------------- 桌宠
+_PET_FACE = _rgb(0xFDFDFD)
+_PET_INK = _rgb(0x2B2B2B)
+_PET_BLUSH = _rgb(0xFF9DB0, 0.55)
+_PET_SHADOW = _rgb(0x000000, 0.10)
+_PET_SWEAT = _rgb(0x6FB3FF)
+
+
+def _pet_shape(cx, cy, w, k):
+    """两端钉在 (cx±w, cy)，中点朝 +y 偏 k。k>0 向上凸，k<0 向下凹。
+
+    眼睛和嘴共用这一条：happy 眼 k>0 是 `^`，笑嘴 k<0 是 `‿`，
+    guard 嘴 k>0 是 `⌢`——正负号的含义在视图坐标（y 向上）下统一。
+    """
+    p = NSBezierPath.bezierPath()
+    p.moveToPoint_((cx - w, cy))
+    p.curveToPoint_controlPoint1_controlPoint2_(
+        (cx + w, cy),
+        (cx - w * 0.55, cy + k * 1.9),
+        (cx + w * 0.55, cy + k * 1.9))
+    return p
+
+
+def _pet_oval(cx, cy, rx, ry):
+    return NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(cx - rx, cy - ry, rx * 2, ry * 2))
+
+
+class _PetView(NSView):
+    """矢量画的圆脸小人。状态全靠类属性兜底（同 _BoxesView 的 getattr 习惯）。"""
+
+    mood = "idle"
+    tier = 0
+    low_conf = False
+    blink = False
+    breath = 0
+
+    def drawRect_(self, rect):
+        b = self.bounds()
+        W, H = b.size.width, b.size.height
+        mood = getattr(self, "mood", "idle")
+        tier = max(0, min(2, getattr(self, "tier", 0)))
+        low_conf = getattr(self, "low_conf", False)
+        blink = bool(getattr(self, "blink", False)) and mood != "happy"
+        breath = getattr(self, "breath", 0)
+        accent = (PALETTE["green"], PALETTE["amber"], PALETTE["red"])[tier]
+
+        cx = W / 2.0
+        cy = H / 2.0 - 4.0
+        r = W * 0.36 * (1.0 - 0.025 * breath)   # 呼吸 = 半径 ±2.5%
+
+        # 地面阴影
+        sh = _pet_oval(cx, cy - r - 6, r * 0.78, 5)
+        _PET_SHADOW.set()
+        sh.fill()
+
+        # 脸 + 风险描边
+        face = _pet_oval(cx, cy, r, r)
+        _PET_FACE.set()
+        face.fill()
+        accent.set()
+        face.setLineWidth_(3.2)
+        face.stroke()
+
+        ex = r * 0.36
+        ey = cy + r * 0.14 + (r * 0.10 if mood == "think" else 0.0)
+        my = cy - r * 0.34
+        mw = r * 0.30
+        _PET_INK.set()
+
+        if blink:
+            for sx in (-1, 1):
+                p = _pet_shape(cx + sx * ex, ey, r * 0.17, -1.5)
+                p.setLineWidth_(3.0)
+                p.stroke()
+        elif mood == "happy":
+            for sx in (-1, 1):
+                p = _pet_shape(cx + sx * ex, ey, r * 0.17, 4.5)
+                p.setLineWidth_(3.0)
+                p.stroke()
+            _PET_BLUSH.set()
+            _pet_oval(cx - ex - r * 0.08, ey - r * 0.36, r * 0.15, r * 0.09).fill()
+            _pet_oval(cx + ex + r * 0.08, ey - r * 0.36, r * 0.15, r * 0.09).fill()
+            _PET_INK.set()
+        elif mood == "stressed":
+            for sx in (-1, 1):
+                p = _pet_shape(cx + sx * ex, ey, r * 0.17, -4.5)
+                p.setLineWidth_(3.0)
+                p.stroke()
+            _PET_SWEAT.set()
+            _pet_oval(cx + r * 0.86, cy + r * 0.34, r * 0.11, r * 0.15).fill()
+            _PET_INK.set()
+        elif mood == "guard":
+            for sx in (-1, 1):                      # 眯眼
+                _pet_oval(cx + sx * ex, ey, r * 0.19, r * 0.085).fill()
+        elif mood == "alert":
+            for sx in (-1, 1):                      # 瞪大 + 高光
+                _pet_oval(cx + sx * ex, ey, r * 0.15, r * 0.17).fill()
+                _PET_FACE.set()
+                _pet_oval(cx + sx * ex + r * 0.05, ey + r * 0.05,
+                          r * 0.05, r * 0.05).fill()
+                _PET_INK.set()
+        elif mood == "chill":
+            for sx in (-1, 1):
+                p = _pet_shape(cx + sx * ex, ey, r * 0.17, 1.5)
+                p.setLineWidth_(3.0)
+                p.stroke()
+        else:                                        # idle / ready / think / error
+            for sx in (-1, 1):
+                _pet_oval(cx + sx * ex, ey, r * 0.11, r * 0.13).fill()
+
+        # 嘴
+        if mood in ("alert", "error"):
+            mouth = _pet_oval(cx, my, r * 0.13, r * 0.16)
+        else:
+            # think/ready 是平直的「嗯…」，别用 k>0——那会凸成哭脸（实测过）
+            k = {"happy": -6.5, "chill": -3.5, "guard": 5.0,
+                 "stressed": 3.0, "think": 0.0, "ready": 0.0}.get(mood, -3.0)
+            wscale = {"happy": 1.15, "think": 0.72, "ready": 0.95}.get(mood, 0.95)
+            mouth = _pet_shape(cx, my, mw * wscale, k)
+        mouth.setLineWidth_(3.2 if mood != "happy" else 3.6)
+        mouth.stroke()
+
+        # 角标：状态自带的，或低把握时的问号
+        badge, bcolor = {"alert": ("!", PALETTE["amber"]),
+                         "error": ("!", PALETTE["red"]),
+                         "think": ("?", PALETTE["muted"])}.get(mood, (None, None))
+        if badge is None and low_conf:
+            badge, bcolor = ("?", PALETTE["muted"])
+        if badge:
+            ch = NSAttributedString.alloc().initWithString_attributes_(
+                badge, {NSFontAttributeName: NSFont.boldSystemFontOfSize_(17),
+                        NSForegroundColorAttributeName: bcolor})
+            ch.drawAtPoint_((cx + r * 0.70, cy + r * 0.52))
+
+
 class HudController(NSObject):
     def init(self):
         self = objc.super(HudController, self).init()
@@ -154,6 +306,10 @@ class HudController(NSObject):
         self._paused = False
         self._show_boxes = userconfig.get("JEV_BOXES").strip().lower() in (
             "1", "true", "yes", "on")
+        # 桌宠默认开（JEV_PET=0 关）——同 JEV_BOXES 的开关写法
+        self._show_pet = userconfig.get("JEV_PET").strip().lower() not in (
+            "0", "false", "no", "off")
+        self._pet_tier = 0
         self._last_risk = 0.0
         self._chat_title = ""
         self._asked_permission = False
@@ -162,6 +318,7 @@ class HudController(NSObject):
         self._pending_origin = None
         self._build_panel()
         self._build_overlay()
+        self._build_pet()
         self._expanded_h = self.panel.frame().size.height
         return self
 
@@ -228,6 +385,80 @@ class HudController(NSObject):
         self._ov_panel.setContentView_(view)
 
     @objc.python_method
+    def _build_pet(self):
+        """桌宠窗口：照抄 _build_overlay 的窗口属性，外加「所有桌面都跟」。"""
+        self._pet_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, PET_W, PET_H), NSWindowStyleMaskBorderless,
+            NSBackingStoreBuffered, False)
+        self._pet_panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self._pet_panel.setOpaque_(False)
+        self._pet_panel.setHasShadow_(False)
+        self._pet_panel.setIgnoresMouseEvents_(True)   # 点击穿透，绝不挡鼠标
+        self._pet_panel.setHidesOnDeactivate_(False)
+        self._pet_panel.setBackgroundColor_(NSColor.clearColor())
+        self._pet_panel.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+            | AppKit.NSWindowCollectionBehaviorStationary
+            | AppKit.NSWindowCollectionBehaviorIgnoresCycle)
+        view = _PetView.alloc().initWithFrame_(NSMakeRect(0, 0, PET_W, PET_H))
+        view.setWantsLayer_(True)
+        self._pet_view = view
+        self._pet_panel.setContentView_(view)
+        self._place_pet()
+        # 眨眼/呼吸：只在状态真变了才 setNeedsDisplay（Intel 上每帧重绘没必要）
+        self._pet_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            PET_TICK, self, "petTick:", None, True)
+
+    def petTick_(self, _timer):
+        v = getattr(self, "_pet_view", None)
+        if v is None:
+            return
+        now = time.monotonic()
+        blink = (now % 2.6) < 0.13                                  # 每 2.6s 眨一次
+        breath = int((math.sin(now * 2 * math.pi / 2.4) * 0.5 + 0.5) * 3)
+        if v.blink != blink or v.breath != breath:
+            v.blink, v.breath = blink, breath
+            v.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def _place_pet(self):
+        """贴着 HUD 面板摆：优先右侧，放不下翻左侧，再不行压到面板上方，全程夹紧在屏内。"""
+        panel = getattr(self, "_pet_panel", None)
+        if panel is None or not hasattr(self, "panel"):
+            return
+        screens = list(NSScreen.screens())
+        if not screens:
+            return
+        pf = self.panel.frame()
+        host = next((s for s in screens
+                     if s.frame().origin.x <= pf.origin.x
+                     < s.frame().origin.x + s.frame().size.width
+                     and s.frame().origin.y <= pf.origin.y
+                     < s.frame().origin.y + s.frame().size.height), screens[0])
+        sf = host.frame()
+        x = pf.origin.x + pf.size.width + PET_GAP
+        if x + PET_W > sf.origin.x + sf.size.width - 8:
+            x = pf.origin.x - PET_W - PET_GAP
+        if x < sf.origin.x + 8:
+            x = pf.origin.x + (pf.size.width - PET_W) / 2.0
+        y = pf.origin.y + pf.size.height + PET_GAP
+        if y + PET_H > sf.origin.y + sf.size.height - 8:
+            y = pf.origin.y + (pf.size.height - PET_H) / 2.0
+        panel.setFrameOrigin_((round(x), round(y)))
+
+    @objc.python_method
+    def _pet_set(self, mood: str, tier: int = 0, low_conf: bool = False):
+        if not getattr(self, "_show_pet", False) or not hasattr(self, "_pet_view"):
+            return
+        v = self._pet_view
+        changed = (v.mood, v.tier, v.low_conf) != (mood, tier, low_conf)
+        v.mood, v.tier, v.low_conf = mood, tier, low_conf
+        if changed:
+            v.setNeedsDisplay_(True)
+        if not self._pet_panel.isVisible():
+            self._pet_panel.orderFrontRegardless()
+
+    @objc.python_method
     def _relayout(self):
         dy = 30
         for key, _, _, _, height in (
@@ -283,6 +514,7 @@ class HudController(NSObject):
             ("显示 / 收起面板", "collapsePanel:", ""),
             ("暂停读屏", "togglePause:", ""),
             ("YOLO 检测框", "toggleBoxes:", ""),
+            ("桌宠", "togglePet:", ""),
             ("立即重新分析", "reanalyze:", ""),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
@@ -294,6 +526,9 @@ class HudController(NSObject):
         self.boxes_item = menu.itemArray()[2]
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
+        self.pet_item = menu.itemArray()[3]
+        self.pet_item.setState_(
+            AppKit.NSOnState if self._show_pet else AppKit.NSOffState)
         self.status_item.setMenu_(menu)
 
     @objc.python_method
@@ -312,6 +547,10 @@ class HudController(NSObject):
     def _show(self):
         if not self.panel.isVisible():
             self.panel.orderFrontRegardless()
+        if getattr(self, "_show_pet", False) and hasattr(self, "_pet_panel") \
+                and not self._pet_panel.isVisible():
+            self._place_pet()
+            self._pet_panel.orderFrontRegardless()
 
     @objc.python_method
     def _context_line(self, sender, prev: str) -> str:
@@ -679,9 +918,11 @@ class HudController(NSObject):
         self._show()
         self._last_intent = ""
         self._last_risk = 0.0
+        self._pet_tier = 0
         for key in ("message", "sender", "intent", "confidence", "risk", "actions"):
             self._render(key, "", PALETTE["muted"])
         self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
+        self._pet_set("idle", 0)
 
     def applyChat_(self, title):
         self._chat_title = title
@@ -693,6 +934,7 @@ class HudController(NSObject):
         self._render("status", "有新消息 · 等消息停稳…", PALETTE["muted"])
         self._render("message", text, PALETTE["muted"])
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._pet_set("alert", self._pet_tier)
 
     def applyPending_(self, payload):
         text, sender, prev = payload
@@ -700,6 +942,7 @@ class HudController(NSObject):
         self._render("status", "分析中…", PALETTE["muted"])
         self._render("message", text, PALETTE["text"])
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._pet_set("think", self._pet_tier)
 
     def applyJudgment_(self, payload):
         v, sender, prev = payload
@@ -723,10 +966,16 @@ class HudController(NSObject):
             PALETTE["amber"] if risk <= 6 else PALETTE["red"])
         self._render("risk", f"● {label}  {risk}/9", color)
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
+        # 桌宠：意图给表情，风险给描边色，把握低<0.5 加问号角标
+        tier = 0 if risk <= 3 else (1 if risk <= 6 else 2)
+        self._pet_tier = tier
+        self._pet_set(_MOOD_BY_INTENT.get(v["intent"], "ready"), tier,
+                      low_conf=float(v.get("confidence", 1.0)) < 0.5)
 
     def applyError_(self, text):
         self._show()
         self._render("status", text, PALETTE["red"])
+        self._pet_set("error", 2)
 
     def applyHidden_(self, reason):
         self._render("status", reason, PALETTE["muted"])
@@ -734,9 +983,12 @@ class HudController(NSObject):
             self.panel.orderOut_(None)
         if self._ov_panel.isVisible():
             self._ov_panel.orderOut_(None)
+        if hasattr(self, "_pet_panel") and self._pet_panel.isVisible():
+            self._pet_panel.orderOut_(None)
 
     def applyPosition_(self, win):
         self._position_near(win)
+        self._place_pet()
 
     def applyBoxes_(self, payload):
         if not self._show_boxes:
@@ -797,6 +1049,20 @@ class HudController(NSObject):
             _log(f"YOLO 立即上屏 · {len(msgs)} 框（缓存）")
         else:
             _log("YOLO 等待下一跳读屏（暂无缓存）")
+
+    def togglePet_(self, sender):
+        self._show_pet = not self._show_pet
+        self.pet_item.setState_(
+            AppKit.NSOnState if self._show_pet else AppKit.NSOffState)
+        if not self._show_pet:
+            if self._pet_panel.isVisible():
+                self._pet_panel.orderOut_(None)
+            _log("桌宠 关")
+            return
+        _log("桌宠 开")
+        v = self._pet_view
+        self._place_pet()
+        self._pet_set(v.mood, v.tier, v.low_conf)
 
     @objc.python_method
     def _warm(self):

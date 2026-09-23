@@ -12,6 +12,7 @@
   ```bash
   python3 -B -m unittest discover -s tests -v      # 消息几何/归属/判断触发门（AST 加载，离线，不起 Cocoa）
   python3 probe/perception_regression.py           # 感知层自测（合成 OCR，离线）
+  python3 probe/pet_preview.py /tmp/pet.png        # 桌宠表情渲染成图，肉眼验绘制
   python3 src/perception.py                        # 感知层读屏（见下方 CLI 验证陷阱）
   python3 src/judge.py "这个需求你今天跟一下"
   python3 src/judge_zh_test.py                     # 22 条意图回归——改判断层 prompt 后必须重跑
@@ -28,6 +29,7 @@
 - **预判早跑**（`_prejudge_loop`，latest-wins 槽位）：消息一出现就起跑，停稳门只消费「文本仍是最新」的结果（守卫是 `text == self.last_seen`）。**状态作废有两处，别删**：换会话时清 `last_seen`/`analyzed_text`/`_prejudge_result`（否则同一句话在新会话里被判成「已分析过」，新语境永远判不到）；读不到对方消息时同样清（否则判断期间消息消失，迟到的预判结论会存回来）。
 - **分析在独立线程**（`_run_analysis` + `_analyzing` 防重入），别塞回 tick 线程——那会重新造成分析期间轮询停摆。
 - **YOLO 检测框**（`_build_overlay`/`applyBoxes_`，`JEV_BOXES=1` 启动即开、菜单栏可切、默认关）：透明点击穿透窗把最近一次 OCR 的消息画成检测框，纯视觉层——窗口 ID 抓图看不见它、不参与任何管线逻辑；坐标映射依赖 1x nominal 采集尺寸=窗口点尺寸（`capture_image(nominal=True)` 成立）。`Message` 的 x/w 是框几何，折行时在 `extract_messages` 里维护。
+- **桌宠**（`_PetView`/`_build_pet`/`_pet_set`，`JEV_PET` 默认开、菜单栏可切）：矢量画的圆脸小人，**纯展示层**——只在 5 个 `apply*` 末尾被驱动，感知/判断一行不改。窗口照抄 `_build_overlay` 的属性，多加 `setIgnoresMouseEvents_(True)`（点击穿透）+ `setCollectionBehavior_`（所有桌面都跟、不进 Mission Control）；`_place_pet` 贴 HUD 面板右侧、放不下翻左侧/上方、全程夹紧屏内。`_MOOD_BY_INTENT` 把 8 类意图映射到表情，风险**复用** `applyJudgment_` 已有的 ≤3/≤6/>6 分档当描边色。**绘制必须渲染成 PNG 实测**（`python3 probe/pet_preview.py`）——嘴的 k>0 是向上凸，会画成哭脸，think 曾这么踩过；眨眼/呼吸只在状态真变时 `setNeedsDisplay_`，别每帧重绘。
 - **本地推理用 float16**：MPS 对 bfloat16 算子覆盖不全会走慢路径（实测 ~1.4s vs ~0.75s，准确率不变）。
 - **OCR 用 Vision**：语言只留 `zh-Hans`（多加 en-US 逐块一致却慢 30%）、Accurate 档（Fast 漏字）、语言校正开着、别缩 ROI（丢上下文）。**采集分辨率降到 1x**（`kCGWindowImageNominalResolution`）是实测过的例外：合成中文 6 行 2x ~140ms → 1x ~100ms、逐字一致；布局常量全是归一化的，不受影响。
 - **HTTP 走 keep-alive 池**（`src/httpjson.py` 的 `http_post_json`，judge_jev 的判断与排序共用）：每次 urllib.urlopen 新建 DNS+TCP+TLS 白付 ~0.1–0.3 s。网络异常换新连接重试一次；>=300 按 `urllib.error.HTTPError` 形状抛（调用方 `e.read()` 拿正文），不跟随重定向。**没有例外的密钥扫描**：`packaging/build_app.sh` 会拦 `src/` 下任何 `sk-` token——`builtin.py` 那条排除规则已随内置凭据一起删掉。
