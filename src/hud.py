@@ -163,6 +163,16 @@ def _pet_oval(cx, cy, rx, ry):
         NSMakeRect(cx - rx, cy - ry, rx * 2, ry * 2))
 
 
+class _PetPanel(NSPanel):
+    """点桌宠不许抢焦点——borderless 的 NSPanel 默认可能变 key，那会把微信顶失焦。"""
+
+    def canBecomeKeyWindow(self):
+        return False
+
+    def canBecomeMainWindow(self):
+        return False
+
+
 class _PetView(NSView):
     """矢量画的圆脸小人。状态全靠类属性兜底（同 _BoxesView 的 getattr 习惯）。"""
 
@@ -171,6 +181,12 @@ class _PetView(NSView):
     low_conf = False
     blink = False
     breath = 0
+    on_click = None          # _build_pet 绑定：点一下切换信息面板
+
+    def mouseDown_(self, event):
+        cb = getattr(self, "on_click", None)
+        if cb is not None:
+            cb()
 
     def drawRect_(self, rect):
         b = self.bounds()
@@ -310,6 +326,8 @@ class HudController(NSObject):
         self._show_pet = userconfig.get("JEV_PET").strip().lower() not in (
             "0", "false", "no", "off")
         self._pet_tier = 0
+        # 面板默认完全隐藏：具体信息只在点桌宠时出现（点一下切换，不自动收）
+        self._panel_wanted = False
         self._last_risk = 0.0
         self._chat_title = ""
         self._asked_permission = False
@@ -387,13 +405,15 @@ class HudController(NSObject):
     @objc.python_method
     def _build_pet(self):
         """桌宠窗口：照抄 _build_overlay 的窗口属性，外加「所有桌面都跟」。"""
-        self._pet_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        self._pet_panel = _PetPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PET_W, PET_H), NSWindowStyleMaskBorderless,
             NSBackingStoreBuffered, False)
         self._pet_panel.setLevel_(AppKit.NSFloatingWindowLevel)
         self._pet_panel.setOpaque_(False)
         self._pet_panel.setHasShadow_(False)
-        self._pet_panel.setIgnoresMouseEvents_(True)   # 点击穿透，绝不挡鼠标
+        # 不再点击穿透：桌宠是「具体信息」的唯一入口。
+        # 代价（已知、已确认）：这 96×96 范围不再能点到下面的窗口。
+        self._pet_panel.setIgnoresMouseEvents_(False)
         self._pet_panel.setHidesOnDeactivate_(False)
         self._pet_panel.setBackgroundColor_(NSColor.clearColor())
         self._pet_panel.setCollectionBehavior_(
@@ -404,6 +424,7 @@ class HudController(NSObject):
         view.setWantsLayer_(True)
         self._pet_view = view
         self._pet_panel.setContentView_(view)
+        view.on_click = self._toggle_panel
         self._place_pet()
         # 眨眼/呼吸：只在状态真变了才 setNeedsDisplay（Intel 上每帧重绘没必要）
         self._pet_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -419,6 +440,15 @@ class HudController(NSObject):
         if v.blink != blink or v.breath != breath:
             v.blink, v.breath = blink, breath
             v.setNeedsDisplay_(True)
+        # 摆位只认面板 frame：谁挪了面板都会被这里兜住。
+        # 之前靠各调用点自觉补 _place_pet，漏一条就错位（实测桌宠压在面板上）。
+        if hasattr(self, "panel"):
+            f = self.panel.frame()
+            anchor = (round(f.origin.x), round(f.origin.y),
+                      round(f.size.width), round(f.size.height))
+            if anchor != getattr(self, "_pet_anchor", None):
+                self._pet_anchor = anchor
+                self._place_pet()
 
     @objc.python_method
     def _place_pet(self):
@@ -545,12 +575,28 @@ class HudController(NSObject):
 
     @objc.python_method
     def _show(self):
-        if not self.panel.isVisible():
+        # 面板受 _panel_wanted 门控：applyWaiting_ 等每一跳都调这里，
+        # 不受控的话面板会自己冒出来，「点桌宠才出现」就废了。
+        if getattr(self, "_panel_wanted", True) and not self.panel.isVisible():
+            self._place_pet()
             self.panel.orderFrontRegardless()
         if getattr(self, "_show_pet", False) and hasattr(self, "_pet_panel") \
                 and not self._pet_panel.isVisible():
             self._place_pet()
             self._pet_panel.orderFrontRegardless()
+
+    def _toggle_panel(self):
+        """点桌宠：具体信息只在被点击时出现。再点收起，不自动收。"""
+        self._panel_wanted = not self._panel_wanted
+        if self._panel_wanted:
+            self._place_pet()
+            if not self.panel.isVisible():
+                self.panel.orderFrontRegardless()
+            _log("面板 显示")
+        else:
+            if self.panel.isVisible():
+                self.panel.orderOut_(None)
+            _log("面板 隐藏")
 
     @objc.python_method
     def _context_line(self, sender, prev: str) -> str:
@@ -624,6 +670,12 @@ class HudController(NSObject):
 
     # ------------------------------------------------------------ actions
     def collapsePanel_(self, sender):
+        # 面板被藏起来时，菜单项先把它放出来——否则点「显示 / 收起面板」没反应
+        if not self.panel.isVisible():
+            self._panel_wanted = True
+            self._place_pet()
+            self.panel.orderFrontRegardless()
+            return
         self._set_collapsed(not self._collapsed)
 
     def togglePause_(self, sender):
@@ -1057,7 +1109,12 @@ class HudController(NSObject):
         if not self._show_pet:
             if self._pet_panel.isVisible():
                 self._pet_panel.orderOut_(None)
-            _log("桌宠 关")
+            # 桌宠一关就没有入口了——面板必须改常驻，否则信息再也看不着
+            self._panel_wanted = True
+            self._place_pet()
+            if not self.panel.isVisible():
+                self.panel.orderFrontRegardless()
+            _log("桌宠 关 · 面板改为常驻")
             return
         _log("桌宠 开")
         v = self._pet_view
