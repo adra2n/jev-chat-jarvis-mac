@@ -1,6 +1,6 @@
 [project]
 name = "jev-jarvis"
-version = "0.4.0"
+version = "0.5.0"
 description = "微信消息意图识别悬浮窗：本地 Laya 模型判断意图与风险（macOS）"
 readme = "README.md"
 requires-python = ">=3.11"
